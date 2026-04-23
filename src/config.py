@@ -15,6 +15,7 @@ SESSION_PATH = str(BASE_DIR / SESSION_NAME)
 DIGEST_RECIPIENT_ID = int(os.environ["DIGEST_RECIPIENT_ID"])
 DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "opus")
 CHATLIST_INVITE = os.environ.get("CHATLIST_INVITE", "").strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 TIMEZONE = os.environ.get("TIMEZONE", "UTC")
 DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR", "8"))
 
