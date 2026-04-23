@@ -1,0 +1,19 @@
+.env
+*.session
+*.session-journal
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+output/
+digest_cache/
+
+# Секретные данные для деплой-инженера — НИКОГДА не коммитим!
+DEPLOYMENT_SECRETS.md
+SECRETS.md
+secrets/
+credentials/
