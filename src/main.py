@@ -7,7 +7,7 @@ from . import config
 from .collector import collect_all
 from .db import connect
 from .digest import generate_digest
-from .sender import send_digest
+from .sender import send_digest, send_to_all_subscribers
 
 
 def _already_sent_today() -> bool:
@@ -46,14 +46,13 @@ async def run_pipeline(hours_back: int = 24, model: str | None = None,
         print("Дайджест пустой")
         return
 
-    # 3. Send
+    # 3. Send всем подписчикам
     if skip_send:
         print("\nОтправка пропущена (--skip-send)")
     else:
-        await send_digest(
+        await send_to_all_subscribers(
             result["digest_id"],
             result["content"],
-            config.DIGEST_RECIPIENT_ID,
         )
 
     print("\nПайплайн завершён.")

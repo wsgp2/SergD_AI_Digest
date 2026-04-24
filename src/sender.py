@@ -149,9 +149,10 @@ async def send_via_telethon(content: str, recipient_id: int) -> tuple[bool, str]
 
 async def send_digest(digest_id: int, content: str, recipient_id: int,
                       prefer_bot: bool = True) -> bool:
-    """Отправить дайджест. Сначала пробуем бот, fallback на Telethon."""
+    """Отправить дайджест одному получателю. Сначала пробуем бот, fallback на Telethon."""
     sent = False
     error = None
+    delivery = None
 
     if prefer_bot and config.BOT_TOKEN:
         ok, err = send_via_bot(content, recipient_id, config.BOT_TOKEN)
@@ -175,12 +176,60 @@ async def send_digest(digest_id: int, content: str, recipient_id: int,
     if sent:
         mark_digest_sent(conn, digest_id)
         log_run(conn, "send", "ok",
-                details=f"digest_id={digest_id}, via={delivery}")
+                details=f"digest_id={digest_id}, recipient={recipient_id}, via={delivery}")
     else:
         log_run(conn, "send", "error",
-                details=f"digest_id={digest_id}: {error}")
+                details=f"digest_id={digest_id}, recipient={recipient_id}: {error}")
     conn.close()
     return sent
+
+
+async def send_to_all_subscribers(digest_id: int, content: str) -> dict:
+    """Отправить дайджест всем активным подписчикам.
+
+    Возвращает статистику {sent, failed, recipients}.
+    """
+    # Читаем активных подписчиков
+    conn = connect()
+    # Если таблицы нет — fallback на одного владельца
+    try:
+        rows = conn.execute(
+            "SELECT user_id, username, first_name FROM subscribers WHERE is_active = 1"
+        ).fetchall()
+        recipients = [r["user_id"] for r in rows]
+    except Exception:
+        # Таблицы subscribers ещё нет — работаем со старой логикой
+        recipients = [config.DIGEST_RECIPIENT_ID]
+    conn.close()
+
+    if not recipients:
+        # Защита от пустого списка — всё равно шлём владельцу
+        recipients = [config.DIGEST_RECIPIENT_ID]
+
+    print(f"\nРассылка {len(recipients)} подписчикам…")
+    sent_count = 0
+    failed_count = 0
+
+    for i, recipient_id in enumerate(recipients, 1):
+        print(f"\n[{i}/{len(recipients)}] → {recipient_id}")
+        try:
+            ok = await send_digest(digest_id, content, recipient_id,
+                                   prefer_bot=True)
+            if ok:
+                sent_count += 1
+            else:
+                failed_count += 1
+        except Exception as e:
+            print(f"  ошибка: {e}")
+            failed_count += 1
+
+    print(f"\nРезультат: отправлено {sent_count}/{len(recipients)}, "
+          f"ошибок {failed_count}")
+    return {
+        "sent": sent_count,
+        "failed": failed_count,
+        "recipients": len(recipients),
+    }
 
 
 if __name__ == "__main__":
