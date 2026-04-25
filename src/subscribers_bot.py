@@ -87,6 +87,46 @@ def notify_admin(text: str):
     send_message(ADMIN_CHAT_ID, f"🔔 <b>AI Digest</b>\n\n{text}")
 
 
+def _get_latest_digest() -> dict | None:
+    """Возвращает последний отправленный дайджест из БД."""
+    conn = connect()
+    try:
+        row = conn.execute("""
+            SELECT id, digest_date, content
+            FROM digests
+            WHERE sent_at IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+        """).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def _send_digest_to_user(user_id: int, digest: dict):
+    """Отправляет ранее сохранённый дайджест новому подписчику.
+
+    Импорт sender тут отложенный, чтобы не тащить telethon при старте бота.
+    """
+    try:
+        from .sender import markdown_to_telegram_html, split_markdown
+        html_content = markdown_to_telegram_html(digest["content"])
+        parts = split_markdown(html_content)
+
+        # Шапка перед первым сообщением
+        intro = (f"🎁 <b>Свежий дайджест за {digest['digest_date']}</b>\n\n"
+                 f"Этот выпуск уже был сформирован сегодня. "
+                 f"Дальше будете получать ежедневно в 08:00 Бали.\n\n"
+                 f"━━━━━━━━━━━━━━━━━━━━")
+        send_message(user_id, intro)
+
+        for part in parts:
+            send_message(user_id, part)
+        return True
+    except Exception as e:
+        print(f"[catchup] failed to send digest to {user_id}: {e}")
+        return False
+
+
 def handle_start(user_id: int, username: str | None, first_name: str | None):
     """Подписка."""
     conn = connect()
@@ -106,6 +146,7 @@ def handle_start(user_id: int, username: str | None, first_name: str | None):
         conn.close()
         return
 
+    is_new = row is None
     if row:
         # Был отписан — реактивируем
         conn.execute("""
@@ -131,16 +172,30 @@ def handle_start(user_id: int, username: str | None, first_name: str | None):
     ).fetchone()["n"]
     conn.close()
 
+    # Проверяем — есть ли свежий дайджест чтобы отправить новому подписчику сразу
+    latest = _get_latest_digest()
+    will_send_catchup = is_new and latest is not None
+
     # Приветствие
-    send_message(user_id,
+    welcome = (
         "🌅 <b>Добро пожаловать в AI Digest!</b>\n\n"
         "Каждое утро в 08:00 Бали (04:00 UTC) вы будете получать "
         "свежий дайджест главных AI-новостей из 25+ каналов.\n\n"
         "Команды:\n"
         "/stop — отписаться\n"
         "/status — статус подписки\n"
-        "/help — справка\n\n"
-        "Ждите первое сообщение завтра утром!")
+        "/help — справка")
+
+    if will_send_catchup:
+        welcome += f"\n\n📨 Сейчас отправлю последний дайджест за {latest['digest_date']}…"
+    else:
+        welcome += "\n\nЖдите первое сообщение завтра утром!"
+
+    send_message(user_id, welcome)
+
+    # Catchup: отправить последний дайджест новому подписчику
+    if will_send_catchup:
+        _send_digest_to_user(user_id, latest)
 
     # Уведомление владельцу (кроме самого владельца)
     if user_id != ADMIN_CHAT_ID:
