@@ -13,7 +13,7 @@ import urllib.error
 from telethon import TelegramClient
 
 from . import config
-from .db import connect, mark_digest_sent, log_run
+from .db import connect, mark_digest_sent, log_run, now_iso
 
 
 # Telegram hard limit — 4096 символов на сообщение
@@ -147,6 +147,37 @@ async def send_via_telethon(content: str, recipient_id: int) -> tuple[bool, str]
 
 # ─── Универсальный send ──────────────────────────────────
 
+def _auto_unsubscribe(user_id: int, reason: str):
+    """Автоматическая отписка пользователя (заблокировал бота / удалил аккаунт / т.п.).
+
+    Не падает если таблицы subscribers ещё нет.
+    """
+    try:
+        conn = connect()
+        conn.execute("""
+            UPDATE subscribers
+            SET is_active = 0, unsubscribed_at = ?
+            WHERE user_id = ? AND is_active = 1
+        """, (now_iso(), user_id))
+        conn.commit()
+        conn.close()
+        print(f"  [auto-unsubscribe] {user_id} ({reason})")
+    except Exception as e:
+        print(f"  [auto-unsubscribe] failed for {user_id}: {e}")
+
+
+def _is_user_gone(error_str: str) -> bool:
+    """Проверяет, означает ли ошибка что пользователь больше недоступен."""
+    markers = (
+        "bot was blocked by the user",
+        "user is deactivated",
+        "chat not found",
+        "USER_IS_BLOCKED",
+        "PEER_ID_INVALID",
+    )
+    return any(m in error_str for m in markers)
+
+
 async def send_digest(digest_id: int, content: str, recipient_id: int,
                       prefer_bot: bool = True) -> bool:
     """Отправить дайджест одному получателю. Сначала пробуем бот, fallback на Telethon."""
@@ -160,6 +191,15 @@ async def send_digest(digest_id: int, content: str, recipient_id: int,
             sent = True
             delivery = "bot"
         else:
+            # Если пользователь заблокировал бота — автоматически отписываем
+            if _is_user_gone(err):
+                print(f"Пользователь {recipient_id} недоступен: {err[:100]}")
+                _auto_unsubscribe(recipient_id, err[:80])
+                conn = connect()
+                log_run(conn, "send", "auto_unsubscribe",
+                        details=f"digest_id={digest_id}, recipient={recipient_id}: {err[:200]}")
+                conn.close()
+                return False
             print(f"Bot API не сработал: {err}")
             print("Переключаюсь на Telethon...")
             error = err
