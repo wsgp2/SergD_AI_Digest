@@ -6,14 +6,18 @@ from typing import Iterable
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, ChannelPrivateError
+from telethon.tl import functions
 from telethon.tl.functions.chatlists import (
     CheckChatlistInviteRequest,
     JoinChatlistInviteRequest,
+    EditExportedInviteRequest,
+    GetExportedInvitesRequest,
 )
 from telethon.tl.types import (
     Channel, MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage,
     MessageMediaPoll, DocumentAttributeAudio, DocumentAttributeVideo,
     ReactionEmoji, MessageReplyHeader,
+    DialogFilterChatlist, InputChatlistDialogFilter,
 )
 
 from . import config
@@ -78,9 +82,67 @@ async def get_client() -> TelegramClient:
     return client
 
 
+async def _sync_invite_with_filter(client: TelegramClient, slug: str) -> bool:
+    """Если у нашего аккаунта есть локальная папка с этим invite,
+    синхронизируем invite (peers) с актуальным содержимым папки.
+
+    Это нужно чтобы при добавлении/удалении каналов в Telegram-папке
+    invite-ссылка автоматически отдавала актуальный список.
+
+    Возвращает True если синхронизация выполнена, False — если папка не найдена.
+    """
+    try:
+        flt_resp = await client(functions.messages.GetDialogFiltersRequest())
+        all_filters = flt_resp.filters if hasattr(flt_resp, 'filters') else flt_resp
+
+        # Ищем chatlist-фильтр у которого есть наш invite slug
+        for f in all_filters:
+            if not isinstance(f, DialogFilterChatlist):
+                continue
+            try:
+                inv_resp = await client(GetExportedInvitesRequest(
+                    chatlist=InputChatlistDialogFilter(filter_id=f.id)
+                ))
+            except Exception:
+                continue
+            if not any(inv.url.endswith('/' + slug) for inv in inv_resp.invites):
+                continue
+
+            # Нашли. Синхронизируем invite с filter.include_peers
+            title = f.title.text if hasattr(f.title, 'text') else f.title
+            print(f"  локальная папка '{title}' (filter_id={f.id}): "
+                  f"{len(f.include_peers)} каналов")
+            try:
+                await client(EditExportedInviteRequest(
+                    chatlist=InputChatlistDialogFilter(filter_id=f.id),
+                    slug=slug,
+                    peers=f.include_peers,
+                ))
+                print(f"  ✓ invite синхронизирован с локальной папкой")
+                return True
+            except Exception as e:
+                # Если не получилось редактировать (нет прав, etc) — продолжаем
+                print(f"  предупреждение при синхронизации invite: {e}")
+                return False
+        return False
+    except Exception as e:
+        print(f"  предупреждение при чтении фильтров: {e}")
+        return False
+
+
 async def import_chatlist_if_needed(client: TelegramClient, slug: str) -> list:
-    """Импортировать Telegram folder share (addlist ссылку) если ещё не импортирована."""
+    """Импортировать Telegram folder share (addlist ссылку) если ещё не импортирована.
+
+    Перед импортом делает auto-sync: если у нас локально есть папка с этим invite,
+    обновляет invite актуальным составом каналов из папки. Так каналы можно
+    добавлять/убирать прямо в Telegram-папке через UI — система подхватит их
+    при следующем запуске.
+    """
     print(f"Проверяю папку t.me/addlist/{slug}...")
+
+    # Сначала пытаемся синхронизировать invite с локальной папкой
+    await _sync_invite_with_filter(client, slug)
+
     result = await client(CheckChatlistInviteRequest(slug=slug))
 
     # Канал может быть в `chats` (новый) или `already_chats` (уже подписан)
