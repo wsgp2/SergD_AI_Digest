@@ -118,32 +118,61 @@ def build_prompt(posts: list[dict], digest_date: str) -> str:
             .replace("__POSTS_JSON__", posts_json))
 
 
-def call_claude(prompt: str, model: str = "opus") -> tuple[str, float]:
-    """Запустить `claude -p` и вернуть ответ. Возвращает (text, duration_sec)."""
+def call_claude(prompt: str, model: str = "opus", max_retries: int = 3) -> tuple[str, float]:
+    """Запустить `claude -p` и вернуть ответ. Возвращает (text, duration_sec).
+
+    При транзиентных сетевых ошибках (socket closed, ETIMEDOUT) делаем retry
+    с экспоненциальным бэкоффом. Это покрывает кейсы когда Anthropic API
+    отвалился на пару секунд или у нас сетевой glitch.
+    """
+    transient_markers = (
+        "socket connection was closed",
+        "ETIMEDOUT",
+        "ECONNRESET",
+        "fetch failed",
+        "Connection error",
+        "Internal Server Error",
+        "Service Unavailable",
+        "rate_limit",
+    )
     start = time.time()
-    try:
-        # Передаём промпт через stdin чтобы не упираться в ограничение arg length
-        result = subprocess.run(
-            ["claude", "-p", "--model", model,
-             "--no-session-persistence",
-             "--output-format", "text"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"claude CLI timeout (10min) for model={model}")
+    last_err: Exception | None = None
 
-    duration = time.time() - start
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = subprocess.run(
+                ["claude", "-p", "--model", model,
+                 "--no-session-persistence",
+                 "--output-format", "text"],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"claude CLI timeout (10min) for model={model}")
 
-    if result.returncode != 0:
-        raise RuntimeError(
+        if result.returncode == 0:
+            return result.stdout.strip(), time.time() - start
+
+        # Ошибка. Проверяем транзиентная ли — если да, retry
+        combined = (result.stdout or "") + " " + (result.stderr or "")
+        is_transient = any(m in combined for m in transient_markers)
+
+        last_err = RuntimeError(
             f"claude CLI failed (code={result.returncode}):\n"
             f"STDOUT: {result.stdout[:500]}\nSTDERR: {result.stderr[:500]}"
         )
 
-    return result.stdout.strip(), duration
+        if not is_transient or attempt == max_retries:
+            raise last_err
+
+        backoff = 5 * (2 ** (attempt - 1))  # 5, 10, 20 сек
+        print(f"  [retry] claude транзиентная ошибка, попытка {attempt}/{max_retries}, "
+              f"жду {backoff}с…")
+        time.sleep(backoff)
+
+    raise last_err  # на всякий случай
 
 
 def generate_digest(model: str = "opus", hours_back: int = 24,
