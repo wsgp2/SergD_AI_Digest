@@ -52,7 +52,7 @@ def _init_subscribers_table():
     conn.close()
 
 
-def tg_request(method: str, **params) -> dict:
+def tg_request(method: str, _http_timeout: int = 30, **params) -> dict:
     """Вызов метода Bot API."""
     url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{method}"
     data = json.dumps(params).encode("utf-8")
@@ -62,7 +62,7 @@ def tg_request(method: str, **params) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=_http_timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""
@@ -338,8 +338,11 @@ def poll_loop():
     offset = 0
     while True:
         try:
-            r = tg_request("getUpdates", offset=offset, timeout=30)
+            r = tg_request("getUpdates", offset=offset, timeout=25, _http_timeout=40)
             if not r.get("ok"):
+                err = str(r.get("error", "")).lower()
+                if "timed out" in err or "timeout" in err:
+                    continue
                 print(f"[poll] error: {r}")
                 time.sleep(5)
                 continue
