@@ -341,7 +341,11 @@ def poll_loop():
             r = tg_request("getUpdates", offset=offset, timeout=25, _http_timeout=40)
             if not r.get("ok"):
                 err = str(r.get("error", "")).lower()
-                if "timed out" in err or "timeout" in err:
+                transient = ("timed out", "timeout", "http 502", "http 503",
+                             "http 504", "bad gateway", "service unavailable",
+                             "gateway timeout", "connection reset", "temporarily unavailable")
+                if any(m in err for m in transient):
+                    time.sleep(2)
                     continue
                 print(f"[poll] error: {r}")
                 time.sleep(5)
