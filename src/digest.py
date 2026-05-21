@@ -147,10 +147,18 @@ def call_claude(prompt: str, model: str = "opus", max_retries: int = 3) -> tuple
                 input=prompt,
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=900,
             )
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"claude CLI timeout (10min) for model={model}")
+            # Таймаут — это тоже транзиентная проблема (зависание Anthropic API
+            # или сетевой стек). Раньше падали сразу; теперь делаем retry с backoff.
+            last_err = RuntimeError(f"claude CLI timeout (15min) for model={model} on attempt {attempt}/{max_retries}")
+            if attempt == max_retries:
+                raise last_err
+            backoff = 30 * (2 ** (attempt - 1))  # 30, 60, 120 сек между ретраями на timeout
+            print(f"  [retry] claude CLI timeout, попытка {attempt}/{max_retries}, жду {backoff}с…", flush=True)
+            time.sleep(backoff)
+            continue
 
         if result.returncode == 0:
             return result.stdout.strip(), time.time() - start
