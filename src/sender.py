@@ -78,16 +78,56 @@ def split_markdown(text: str, max_len: int = MAX_MSG_LEN) -> list[str]:
 
 # ─── Bot API ─────────────────────────────────────────────
 
+def _send_part_with_retry(url: str, data: bytes, part_idx: int,
+                          max_retries: int = 3, timeout: int = 60) -> tuple[bool, str]:
+    """Отправляет один кусок через Bot API с retry на transient-ошибки сети/SSL.
+
+    Не ретраит HTTPError (Bot API ответил — значит проблема в самом запросе,
+    повтор не поможет). Ретраит URLError, socket.timeout, TimeoutError, generic
+    Exception (SSL handshake, connection reset, etc.) с backoff 2s/4s/8s.
+    """
+    import time as _time
+    last_err = ""
+    for attempt in range(1, max_retries + 1):
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode())
+            if not result.get("ok"):
+                return False, f"part {part_idx}: {result}"
+            return True, ""
+        except urllib.error.HTTPError as e:
+            # HTTP-уровень — ретрай бесполезен (4xx логика, 5xx тоже редко лечится повторами)
+            body_txt = e.read().decode() if e.fp else ""
+            return False, f"HTTP {e.code} on part {part_idx}: {body_txt[:300]}"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if attempt < max_retries:
+                backoff = 2 ** attempt  # 2s, 4s, 8s
+                print(f"  [{part_idx}] transient {last_err}, retry {attempt}/{max_retries-1} через {backoff}s")
+                _time.sleep(backoff)
+                continue
+    return False, f"Error on part {part_idx} after {max_retries} retries: {last_err}"
+
+
 def send_via_bot(content: str, recipient_id: int, bot_token: str) -> tuple[bool, str]:
-    """Отправить через Telegram Bot API. Возвращает (ok, error_details)."""
+    """Отправить через Telegram Bot API. Возвращает (ok, error_details).
+
+    Каждый part ретраится до 3 раз на transient SSL/timeout сбои с
+    экспоненциальным backoff. HTTP-ошибки (4xx/5xx) не ретраятся.
+    """
     # Claude отдаёт CommonMark (**жирный**, _курсив_), Telegram Bot API
     # корректнее рендерит HTML — конвертируем перед отправкой.
     html_content = markdown_to_telegram_html(content)
     parts = split_markdown(html_content)
     print(f"Отправляю через бота → {recipient_id} ({len(parts)} сообщений)")
 
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     for i, part in enumerate(parts, 1):
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         body = {
             "chat_id": recipient_id,
             "text": part,
@@ -95,22 +135,10 @@ def send_via_bot(content: str, recipient_id: int, bot_token: str) -> tuple[bool,
             "disable_web_page_preview": True,
         }
         data = json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode())
-            if not result.get("ok"):
-                return False, f"part {i}: {result}"
-            print(f"  [{i}/{len(parts)}] ok ({len(part)} симв)")
-        except urllib.error.HTTPError as e:
-            body_txt = e.read().decode() if e.fp else ""
-            return False, f"HTTP {e.code} on part {i}: {body_txt[:300]}"
-        except Exception as e:
-            return False, f"Error on part {i}: {e}"
+        ok, err = _send_part_with_retry(url, data, i)
+        if not ok:
+            return False, err
+        print(f"  [{i}/{len(parts)}] ok ({len(part)} симв)")
 
     return True, ""
 
@@ -200,8 +228,10 @@ async def send_digest(digest_id: int, content: str, recipient_id: int,
                         details=f"digest_id={digest_id}, recipient={recipient_id}: {err[:200]}")
                 conn.close()
                 return False
-            print(f"Bot API не сработал: {err}")
-            print("Переключаюсь на Telethon...")
+            # Bot API не отвечает после ретраев — переходим на Telethon fallback.
+            # Это штатная деградация (sендinг всё равно проходит), поэтому без
+            # ERROR-уровня в логах: bot-monitor не должен алертить на штатные fallback'и.
+            print(f"  bot api недоступен → telethon fallback ({err[:80]})")
             error = err
 
     if not sent:
